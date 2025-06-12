@@ -12,5 +12,7 @@
       "dest": "backend.py"
     }
   ],
-  "installCommand": "pip3.12 install --disable-pip-version-check --target . --upgrade -r requirements.txt"
+  "env": {
+    https://<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>@github.com/pyquotex/pyquotex-api.git
+  }
 }
