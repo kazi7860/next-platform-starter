@@ -5,10 +5,10 @@ import json
 
 app = FastAPI()
 
-# Quotex সংযোগ (তোমাকে এখানে তোমার Quotex ইমেইল ও পাসওয়ার্ড দিতে হবে)
+# Quotex সংযোগ (তোমার ইমেইল ও পাসওয়ার্ড এখানে যোগ করা হয়েছে)
 quotex = pyquotex.Quotex()
-email = "your-quotex-email@example.com"  # তোমার Quotex ইমেইল এখানে দাও
-password = "your-quotex-password"        # তোমার Quotex পাসওয়ার্ড এখানে দাও
+email = "kazimahedihasantushar@gmail.com"  # তোমার Quotex/Gmail ইমেইল
+password = "LOVE78690"                     # তোমার পাসওয়ার্ড
 quotex.connect()
 quotex.login(email, password)
 
