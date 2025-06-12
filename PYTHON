@@ -1,21 +1,10 @@
-from fastapi import FastAPI, WebSocket
-import asyncio
-import logging
+from fastapi import FastAPI
 
 app = FastAPI()
 
-# WebSocket endpoint
-@app.websocket("/ws/signals")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    while True:
-        await websocket.send_json({"message": "Signal data here"})
-        await asyncio.sleep(5)
-
-# Start signals endpoint (dummy for now)
-@app.get("/start_signals")
-async def start_signals():
-    return {"status": "started"}
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
 
 if name == "main":
     import uvicorn
