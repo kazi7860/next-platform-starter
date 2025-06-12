@@ -13,6 +13,6 @@
     }
   ],
   "env": {
-    "https://<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>@github.com/pyquotex/pyquotex-api.git"
+    "GITHUB_TOKEN": "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"
   }
 }
