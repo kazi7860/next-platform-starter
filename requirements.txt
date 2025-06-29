@@ -1,4 +1,4 @@
-fastapi==0.68.0
-uvicorn==0.15.0
-websocket-client==1.2.1
-git+https://github.com/pyquotex/pyquotex-api.git
+Flask
+Flask-CORS
+requests
+gunicorn
