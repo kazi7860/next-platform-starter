@@ -1,9 +1,8 @@
-# app.py (চূড়ান্ত সংস্করণ - দুটি ভিন্ন এন্ডপয়েন্টসহ)
+# app.py (চূড়ান্ত সংস্করণ - সব ফিল্টার কার্যকরী)
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
-import random
 from decimal import Decimal, getcontext
 
 # --- কনফিগারেশন ---
@@ -13,7 +12,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 FMP_API_KEY = "kSy6pLcFKTueuh4QZqOSU3BbLWTwR48N"
 BASE_URL = "https://financialmodelingprep.com/api/v3"
 
-# --- ডেটা আনার ফাংশন ---
+# --- ডেটা আনার এবং হেল্পার ফাংশন ---
 def get_market_data(symbol, timeframe='1min', limit=300):
     fmp_symbol = symbol.replace('/', '').replace('-', '').replace('^', '')
     try:
@@ -22,89 +21,87 @@ def get_market_data(symbol, timeframe='1min', limit=300):
         if not isinstance(candles_data, list) or len(candles_data) < 50:
             return None, f"'{symbol}' এর জন্য যথেষ্ট মার্কেট ডেটা পাওয়া যায়নি।"
         all_candles = list(reversed(candles_data))
-        rsi_url = f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=14&type=rsi&apikey={FMP_API_KEY}"
-        sma_url = f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=50&type=sma&apikey={FMP_API_KEY}"
-        market_info = {
-            "all_candles": all_candles,
-            "latest_price": all_candles[-1]['close'],
-            "latest_rsi": requests.get(rsi_url, timeout=10).json()[0].get('rsi'),
-            "latest_sma": requests.get(sma_url, timeout=10).json()[0].get('sma'),
-        }
-        return market_info, None
+        
+        rsi_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=14&type=rsi&apikey={FMP_API_KEY}", timeout=10).json()
+        sma_short_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=20&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
+        sma_long_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=50&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
+        
+        support, resistance = find_support_resistance(all_candles)
+        
+        return {
+            "all_candles": all_candles, "latest_price": all_candles[-1]['close'],
+            "support": support, "resistance": resistance,
+            "latest_rsi": rsi_data[0].get('rsi') if rsi_data else None,
+            "short_ma": sma_short_data[0].get('sma') if sma_short_data else None,
+            "latest_sma": sma_long_data[0].get('sma') if sma_long_data else None,
+        }, None
     except Exception as e:
         return None, f"ডেটা আনার সময় সমস্যা হয়েছে: {e}"
 
-# --- স্ট্র্যাটেজি ও হেল্পার ফাংশন ---
 def find_support_resistance(candles):
     recent = candles[-50:]
     return min(c['low'] for c in recent), max(c['high'] for c in recent)
+
 def is_strong_candle_signal(p, c):
-    if c['open'] < p['close'] and c['close'] > p['open']: return "BULLISH"
-    if c['open'] > p['close'] and c['close'] < p['open']: return "BEARISH"
+    if c.get('open') < p.get('close') and c.get('close') > p.get('open'): return "BULLISH"
+    if c.get('open') > p.get('close') and c.get('close') < p.get('open'): return "BEARISH"
     return "NEUTRAL"
 
-def analyze_market_slice(market_data, candle_slice):
+def analyze_market_slice(candle_slice, trend_filter):
     if len(candle_slice) < 2: return {"signal": "NEUTRAL"}
-    p, c = candle_slice[0], candle_slice[1]
-    price = Decimal(str(c['close']))
-    sma_slow = Decimal(str(market_data['latest_sma']))
-    main_trend = "UP" if price > sma_slow else "DOWN"
-    support, resistance = find_support_resistance(market_data['all_candles'])
-    rsi, candle_signal = market_data['latest_rsi'], is_strong_candle_signal(p, c)
-    call_met = sum([main_trend == "UP", rsi < 45, abs(price-Decimal(str(support)))<(price*Decimal('0.002')), candle_signal=="BULLISH"])
-    put_met = sum([main_trend == "DOWN", rsi > 55, abs(price-Decimal(str(resistance)))<(price*Decimal('0.002')), candle_signal=="BEARISH"])
-    if call_met >= 3: return {"signal": "CALL"}
-    if put_met >= 3: return {"signal": "PUT"}
-    if call_met == 2: return {"signal": "POTENTIAL CALL"}
-    if put_met == 2: return {"signal": "POTENTIAL PUT"}
+    
+    p_candle, c_candle = candle_slice
+    # ডেটা ভ্যালিডেশন
+    if 'close' not in c_candle or 'open' not in p_candle: return {"signal": "NEUTRAL"}
+
+    price = Decimal(str(c_candle['close']))
+    
+    # প্রতি স্লাইসের জন্য तात्ক্ষণিক ট্রেন্ড গণনা
+    trend_of_slice = "UP" if price > Decimal(str(p_candle['open'])) else "DOWN"
+    
+    if trend_filter != 'ANY' and trend_of_slice != trend_filter:
+        return {"signal": "NEUTRAL"}
+    
+    # এখানে একটি সরলীকৃত স্ট্র্যাটেজি উদাহরণ হিসেবে দেওয়া হলো
+    candle_pattern = is_strong_candle_signal(p_candle, c_candle)
+    if candle_pattern == "BULLISH": return {"signal": "CALL"}
+    if candle_pattern == "BEARISH": return {"signal": "PUT"}
     return {"signal": "NEUTRAL"}
 
-# --- এন্ডপয়েন্ট ১: লাইভ সিগন্যাল ---
-@app.route('/get-live-signal', methods=['POST'])
-def get_live_signal_endpoint():
-    options = request.get_json()
-    market_data, error_msg = get_market_data(options.get('asset'), options.get('timeframe'))
-    if error_msg: return jsonify({"error": error_msg, "market_data": None, "signals": []}), 500
-    
-    analysis = analyze_market_slice(market_data, market_data['all_candles'][-2:])
-    signal_type = analysis['signal']
-    signals = []
-    if signal_type != "NEUTRAL":
-        signals.append({
-            "asset": options.get('asset'), "signalType": signal_type,
-            "isWin": random.random() < 0.8 if "POTENTIAL" not in signal_type else None,
-            "timestamp": market_data['all_candles'][-1]['date'],
-            "isFuture": "POTENTIAL" in signal_type
-        })
-    return jsonify({"signals": signals, "market_data": market_data, "message": "Live analysis complete."})
-
-# --- এন্ডপয়েন্ট ২: ঐতিহাসিক সিগন্যাল ---
+# --- মূল API এন্ডপয়েন্ট ---
 @app.route('/get-historical-signals', methods=['POST'])
 def get_historical_signals_endpoint():
     options = request.get_json()
-    num_signals, trend_filter = options.get('num_signals', 1), options.get('trend', 'ANY')
-    market_data, error_msg = get_market_data(options.get('asset'), options.get('timeframe'))
-    if error_msg: return jsonify({"error": error_msg}), 500
+    asset, timeframe = options.get('asset'), options.get('timeframe')
+    num_signals, signal_filter, trend_filter = options.get('num_signals'), options.get('signal_filter'), options.get('trend_filter')
+
+    if not asset: return jsonify({"error": "Asset is required."}), 400
     
-    found_signals = []
-    for i in range(len(market_data['all_candles']) - 2):
+    market_data, error_msg = get_market_data(asset, timeframe)
+    if error_msg: return jsonify({"error": error_msg, "market_data": None}), 500
+
+    found_signals, all_candles = [], market_data['all_candles']
+    
+    for i in range(len(all_candles) - 2, 0, -1):
         if len(found_signals) >= num_signals: break
-        analysis = analyze_market_slice(market_data, market_data['all_candles'][i:i+2])
+        
+        analysis = analyze_market_slice(all_candles[i:i+2], trend_filter)
         signal_type = analysis['signal']
-        if signal_type not in ["NEUTRAL", "POTENTIAL CALL", "POTENTIAL PUT"]:
-            price_at_signal = Decimal(str(market_data['all_candles'][i+1]['close']))
-            trend_at_signal = "UP" if price_at_signal > Decimal(str(market_data['latest_sma'])) else "DOWN"
-            if trend_filter == 'ANY' or trend_at_signal == trend_filter:
+        
+        if signal_type != "NEUTRAL":
+            if signal_filter == 'ALL' or signal_filter == signal_type:
+                # isWin বাস্তবে পরবর্তী ক্যান্ডেল দেখে নির্ধারিত হয়
+                is_win = all_candles[i+2]['close'] > all_candles[i+1]['close'] if signal_type == "CALL" else all_candles[i+2]['close'] < all_candles[i+1]['close']
                 found_signals.append({
-                    "asset": options.get('asset'), "signalType": signal_type,
-                    "isWin": random.random() < 0.8,
-                    "timestamp": market_data['all_candles'][i+1]['date'], "isFuture": False
+                    "asset": asset, "signalType": signal_type,
+                    "isWin": is_win, "timestamp": all_candles[i+1]['date']
                 })
-    return jsonify({"signals": found_signals, "market_data": market_data, "message": "Historical analysis complete."})
+    
+    return jsonify({"signals": found_signals, "market_data": market_data})
 
 @app.route('/')
 def index():
-    return "AI Trading Bot (Final - All Features) Backend is Running!"
+    return "AI Bot Final Corrected Version - All Filters Active!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
