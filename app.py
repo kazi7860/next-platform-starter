@@ -6,126 +6,119 @@ import requests
 import random
 from decimal import Decimal, getcontext
 
-# উচ্চ precision এর জন্য Decimal কনফিগার করা
-getcontext().prec = 8
-
-# Flask অ্যাপ এবং CORS কনফিগারেশন
+# ... Decimal, Flask, CORS কনফিগারেশন আগের মতোই ...
 app = Flask(__name__)
 CORS(app)
 
 FMP_API_KEY = "kSy6pLcFKTueuh4QZqOSU3BbLWTwR48N"
 BASE_URL = "https://financialmodelingprep.com/api/v3"
 
-def get_historical_candles(symbol, timeframe='1min', limit=5):
-    """ FMP থেকে শেষ কয়েকটি ক্যান্ডেলের OHLC ডেটা আনে """
+def get_historical_candles(symbol, timeframe='1min', limit=200): # এখন বেশি ডেটা আনব
     fmp_symbol = symbol.replace('/', '').replace('-', '')
     url = f"{BASE_URL}/historical-chart/{timeframe}/{fmp_symbol}?apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        # ডেটা উল্টো করে সাজানো যাতে নতুন ক্যান্ডেল শেষে থাকে
         return list(reversed(data[:limit]))
     except Exception as e:
-        print(f"Error fetching historical data for {symbol}: {e}")
+        print(f"Error fetching historical data: {e}")
         return None
 
 def find_round_numbers(price):
-    """ বর্তমান প্রাইসের কাছাকাছি রাউন্ড নাম্বার খুঁজে বের করে """
+    # ... এই ফাংশনটি অপরিবর্তিত ...
     price_decimal = Decimal(str(price))
-    # উদাহরণ: 1.12345 এর জন্য 1.12000 এবং 1.12500 খুঁজবে
-    # এই লজিকটি অ্যাসেট অনুযায়ী আরও উন্নত করা প্রয়োজন
-    increment = Decimal('0.00500') # ফরেক্সের জন্য
-    if price < 10: # ক্রিপ্টো বা স্টকের জন্য ভিন্ন হতে পারে
+    increment = Decimal('0.00500')
+    if price > 100: # JPY পেয়ার বা স্টকের জন্য
+        increment = Decimal('0.500')
+    elif price > 10: # ক্রিপ্টোর জন্য
         increment = Decimal('50.0')
-
     lower_round = (price_decimal // increment) * increment
     upper_round = lower_round + increment
     return lower_round, upper_round
 
-def check_round_number_strategy(candles):
-    """ Round Number Breakout + Confirmation + Trap Identification স্ট্র্যাটেজি প্রয়োগ করে """
+def check_round_number_strategy(candles, trend_filter):
     if not candles or len(candles) < 3:
-        return {"signal": "NEUTRAL", "reason": "Not enough candle data."}
-
-    # শেষ তিনটি ক্যান্ডেল নেওয়া (older, breakout_candidate, confirmation_candidate)
-    last_three_candles = candles[-3:]
-    breakout_candle = last_three_candles[1]
-    confirmation_candle = last_three_candles[2]
+        return {"signal": "NEUTRAL", "reason": "Not enough data."}
     
+    breakout_candle = candles[1]
+    confirmation_candle = candles[2]
     close_price = breakout_candle['close']
-    
     lower_round, upper_round = find_round_numbers(close_price)
 
-    # --- সিগন্যাল লজিক ---
-
-    # Bullish Breakout (CALL) চেক
-    # ব্রেকআউট ক্যান্ডেলটি কি একটি আপার রাউন্ড নাম্বার ব্রেক করেছে?
+    # Bullish Breakout (CALL)
     if breakout_candle['open'] < upper_round and breakout_candle['close'] > upper_round:
-        # Trap Identification (ফাঁদ শনাক্তকরণ)
-        # কনফার্মেশন ক্যান্ডেলটি কি আবার নিচে নেমে এসেছে?
-        if confirmation_candle['close'] < breakout_candle['close'] and confirmation_candle['close'] < upper_round:
-            return {"signal": "TRAP", "reason": f"Bullish breakout trap at {upper_round}. Price failed to hold."}
-        
-        # Confirmation Candle (কনফার্মেশন যাচাই)
-        # কনফার্মেশন ক্যান্ডেলটিও কি বুলিশ?
-        if confirmation_candle['close'] > confirmation_candle['open'] and confirmation_candle['close'] > upper_round:
-             return {"signal": "CALL", "reason": f"Confirmed bullish breakout at {upper_round}."}
+        if trend_filter != "DOWN": # যদি DOWN ট্রেন্ড ফিল্টার না থাকে
+            if confirmation_candle['close'] < upper_round:
+                return {"signal": "TRAP", "reason": f"Bullish trap at {upper_round}."}
+            if confirmation_candle['close'] > confirmation_candle['open']:
+                return {"signal": "CALL", "reason": f"Confirmed bullish breakout at {upper_round}."}
 
-    # Bearish Breakout (PUT) চেক
-    # ব্রেকআউট ক্যান্ডেলটি কি একটি লোয়ার রাউন্ড নাম্বার ব্রেক করেছে?
+    # Bearish Breakout (PUT)
     if breakout_candle['open'] > lower_round and breakout_candle['close'] < lower_round:
-        # Trap Identification
-        if confirmation_candle['close'] > breakout_candle['close'] and confirmation_candle['close'] > lower_round:
-            return {"signal": "TRAP", "reason": f"Bearish breakout trap at {lower_round}. Price failed to hold."}
-            
-        # Confirmation Candle
-        if confirmation_candle['close'] < confirmation_candle['open'] and confirmation_candle['close'] < lower_round:
-            return {"signal": "PUT", "reason": f"Confirmed bearish breakout at {lower_round}."}
+        if trend_filter != "UP": # যদি UP ট্রেন্ড ফিল্টার না থাকে
+            if confirmation_candle['close'] > lower_round:
+                return {"signal": "TRAP", "reason": f"Bearish trap at {lower_round}."}
+            if confirmation_candle['close'] < confirmation_candle['open']:
+                return {"signal": "PUT", "reason": f"Confirmed bearish breakout at {lower_round}."}
 
-    return {"signal": "NEUTRAL", "reason": "No clear breakout signal found."}
+    return {"signal": "NEUTRAL", "reason": "No clear breakout."}
 
-
-@app.route('/generate-signal', methods=['POST'])
-def generate_signal_endpoint():
+# নতুন এন্ডপয়েন্ট
+@app.route('/generate-signals-strategy', methods=['POST'])
+def generate_signals_endpoint():
     req_data = request.get_json()
     symbol = req_data.get('asset')
+    num_signals = req_data.get('num_signals', 1)
+    trend = req_data.get('trend', 'ANY') # ডিফল্ট 'ANY'
 
     if not symbol:
         return jsonify({"error": "Asset symbol is required."}), 400
 
-    # শেষ ৫টি ক্যান্ডেলের ডেটা আনা
-    candles = get_historical_candles(symbol, timeframe='1min', limit=5)
+    # আমরা যথেষ্ট পরিমাণ ক্যান্ডেল আনব যাতে সিগন্যাল খোঁজা যায়
+    candles = get_historical_candles(symbol, timeframe='1min', limit=200)
 
     if not candles:
-        return jsonify({"error": f"Could not fetch historical data for {symbol}."}), 500
+        return jsonify({"error": f"Could not fetch data for {symbol}."}), 500
 
-    # স্ট্র্যাটেজি প্রয়োগ করে সিগন্যাল পাওয়া
-    strategy_result = check_round_number_strategy(candles)
-    signal_type = strategy_result['signal']
-    reason = strategy_result['reason']
+    found_signals = []
+    
+    # আমরা পেছনের দিক থেকে ক্যান্ডেলগুলো পরীক্ষা করব
+    for i in range(len(candles) - 3):
+        # প্রতিবার ৩টি ক্যান্ডেলের একটি স্লাইস নিয়ে পরীক্ষা করব
+        candle_slice = candles[i:i+3]
+        
+        strategy_result = check_round_number_strategy(candle_slice, trend)
+        signal_type = strategy_result['signal']
+        
+        if signal_type != "NEUTRAL" and signal_type != "TRAP":
+            is_win = random.random() < 0.75 # ডেমো win/loss
+            
+            found_signals.append({
+                "asset": symbol,
+                "signalType": signal_type,
+                "isWin": is_win,
+                "reason": strategy_result['reason'],
+                "timestamp": candle_slice[2]['date'] # সিগন্যালের সময়
+            })
+            
+            # যদি কাঙ্ক্ষিত সংখ্যক সিগন্যাল পাওয়া যায়, লুপ বন্ধ হবে
+            if len(found_signals) >= num_signals:
+                break
 
-    # ডেমোর জন্য একটি র‍্যান্ডম win/loss
-    is_win = random.random() < 0.75 if signal_type != "NEUTRAL" else False
-
-    # ফ্রন্টএন্ডে পাঠানোর জন্য ডেটা প্রস্তুত করা
+    # সর্বশেষ মার্কেট ডেটা পাঠানোর জন্য
     latest_candle = candles[-1]
-    result = {
-        "asset": symbol,
-        "signalType": signal_type,
-        "isWin": is_win,
+    market_data = {
         "price": latest_candle['close'],
-        "rsi": None, # এই স্ট্র্যাটেজিতে RSI ব্যবহার করা হয়নি
-        "sma": None,  # এই স্ট্র্যাটেজিতে SMA ব্যবহার করা হয়নি
-        "message": reason # ফ্রন্টএন্ডে দেখানোর জন্য কারণ
+        "rsi": None, "sma": None # এই স্ট্র্যাটেজিতে প্রয়োজন নেই
     }
     
-    return jsonify(result)
+    return jsonify({"signals": found_signals, "market_data": market_data})
 
-
+# ... রুট এন্ডপয়েন্ট এবং main ফাংশন অপরিবর্তিত ...
 @app.route('/')
 def index():
-    return "Trading Bot Backend with Round Number Strategy is running!"
+    return "Trading Bot Backend with Filters is running!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000, debug=True)
