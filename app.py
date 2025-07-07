@@ -1,106 +1,64 @@
-# app.py (চূড়ান্ত সংস্করণ - আপনার সব ফিল্টার কার্যকরী)
-
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
-from decimal import Decimal, getcontext
+from quotexapi.ws import Quotex
+import threading
+import time
 
-# --- কনফিগারেশন ---
-getcontext().prec = 10
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
-FMP_API_KEY = "kSy6pLcFKTueuh4QZqOSU3BbLWTwR48N"
-BASE_URL = "https://financialmodelingprep.com/api/v3"
+CORS(app)
 
-# --- ডেটা আনার এবং হেল্পার ফাংশন ---
-def get_market_data(symbol, timeframe='1min', limit=100):
-    fmp_symbol = symbol.replace('/', '').replace('-', '').replace('^', '')
-    try:
-        candles_url = f"{BASE_URL}/historical-chart/{timeframe}/{fmp_symbol}?limit={limit}&apikey={FMP_API_KEY}"
-        candles_response = requests.get(candles_url, timeout=20)
-        if candles_response.status_code != 200:
-            return None, f"API Error (Status {candles_response.status_code}) for {symbol}"
-        candles_data = candles_response.json()
-        if not isinstance(candles_data, list) or len(candles_data) < 50:
-            return None, f"'{symbol}' এর জন্য যথেষ্ট ক্যান্ডেল ডেটা পাওয়া যায়নি।"
-        all_candles = list(reversed(candles_data))
-        
-        rsi_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=14&type=rsi&apikey={FMP_API_KEY}", timeout=10).json()
-        sma_short_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=20&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
-        sma_long_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=50&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
-        
-        support, resistance = find_support_resistance(all_candles)
-        
-        return {
-            "all_candles": all_candles, "latest_price": all_candles[-1]['close'], "support": support,
-            "resistance": resistance, "latest_rsi": rsi_data[0].get('rsi') if rsi_data else None,
-            "short_ma": sma_short_data[0].get('sma') if sma_short_data else None,
-            "latest_sma": sma_long_data[0].get('sma') if sma_long_data else None,
-        }, None
-    except requests.exceptions.RequestException as e:
-        return None, f"নেটওয়ার্ক সমস্যা: {e}"
-    except Exception as e:
-        return None, f"ডেটা প্রসেসিং এ অজানা সমস্যা: {e}"
+# সর্বশেষ ক্যান্ডেল ডেটা রাখার জন্য
+latest_candles = {}
 
-def find_support_resistance(candles): recent = candles[-50:]; return min(c['low'] for c in recent), max(c['high'] for c in recent)
-def is_strong_candle_signal(p, c):
-    try:
-        if c.get('open') < p.get('close') and c.get('close') > p.get('open'): return "BULLISH"
-        if c.get('open') > p.get('close') and c.get('close') < p.get('open'): return "BEARISH"
-    except (TypeError, KeyError): pass
-    return "NEUTRAL"
+# আপনার কনফিগারেশন দিন (সিক্রেট রাখতে চাইলে Render variable ব্যবহার করুন)
+EMAIL = "your_quotex_email"
+PASSWORD = "your_quotex_password"
 
-def analyze_live_market(market_data, trend_filter, signal_filter):
-    try:
-        all_candles = market_data['all_candles']
-        if len(all_candles) < 2: return {"signal": "NONE", "reason": "Not enough data"}
-        if any(market_data.get(key) is None for key in ['latest_price', 'latest_sma', 'latest_rsi']): return {"signal": "NONE", "reason": "Indicator data missing."}
-        
-        price = Decimal(str(market_data['latest_price'])); sma_slow = Decimal(str(market_data['latest_sma']))
-        main_trend = "UP" if price > sma_slow else "DOWN"
-        if trend_filter != 'ANY' and main_trend != trend_filter: return {"signal": "NONE", "reason": f"ট্রেন্ড ({main_trend}) ফিল্টারের সাথে মেলেনি।"}
-        
-        rsi, support, resistance = market_data['latest_rsi'], market_data['support'], market_data['resistance']
-        candle_signal = is_strong_candle_signal(all_candles[-2], all_candles[-1])
-        call_conditions = [(main_trend == "UP", "ট্রেন্ড UP"), (rsi < 45, "RSI কম"), (abs(price-Decimal(str(support)))<(price*Decimal('0.002')), "সাপোর্টের কাছে"), (candle_signal=="BULLISH", "বুলিশ ক্যান্ডেল")]
-        put_conditions = [(main_trend == "DOWN", "ট্রেন্ড DOWN"), (rsi > 55, "RSI বেশি"), (abs(price-Decimal(str(resistance)))<(price*Decimal('0.002')), "রেসিস্ট্যান্সের কাছে"), (candle_signal=="BEARISH", "বেয়ারিশ ক্যান্ডেল")]
-        call_met, put_met = sum(c[0] for c in call_conditions), sum(c[0] for c in put_conditions)
-        
-        if call_met >= 3 and signal_filter in ["ALL", "CALL"]: return {"signal": "CALL", "is_future": False, "reason": "লাইভ সিগন্যাল: শর্ত মিলেছে।"}
-        if put_met >= 3 and signal_filter in ["ALL", "PUT"]: return {"signal": "PUT", "is_future": False, "reason": "লাইভ সিগন্যাল: শর্ত মিলেছে।"}
-        if call_met == 2 and signal_filter in ["ALL", "CALL"]: reasons = [r for met, r in call_conditions if met]; return {"signal": "POTENTIAL CALL", "is_future": True, "reason": " এবং ".join(reasons) + "।"}
-        if put_met == 2 and signal_filter in ["ALL", "PUT"]: reasons = [r for met, r in put_conditions if met]; return {"signal": "POTENTIAL PUT", "is_future": True, "reason": " এবং ".join(reasons) + "।"}
-        return {"signal": "NONE", "reason": "এই মুহূর্তে কোনো ভালো সুযোগ তৈরি হচ্ছে না।"}
-    except Exception as e: return {"signal": "NONE", "reason": f"স্ট্র্যাটেজি অ্যানালাইসিস এ সমস্যা: {e}"}
+q = Quotex(EMAIL, PASSWORD)
 
-# --- মূল API এন্ডপয়েন্ট ---
-@app.route('/get-signal', methods=['POST'])
-def get_signal_endpoint():
-    try:
-        options = request.get_json()
-        asset, timeframe, trend_filter, signal_filter = options.get('asset'), options.get('timeframe'), options.get('trend_filter'), options.get('signal_filter')
-        if not asset: return jsonify({"error": "Asset is required."}), 400
-        
-        market_data, error_msg = get_market_data(asset, timeframe)
-        if error_msg: return jsonify({"error": error_msg, "market_data": None, "analysis": None}), 400
-        
-        analysis = analyze_live_market(market_data, trend_filter, signal_filter)
-        return jsonify({ "analysis": analysis, "market_data": market_data })
-    except Exception as e: return jsonify({"error": f"সার্ভারে একটি অপ্রত্যাশিত সমস্যা হয়েছে: {e}"}), 500
+def on_candle(data):
+    # data['symbol'] = e.g. 'EURUSD_OTC'
+    asset = data.get('symbol')
+    if asset:
+        latest_candles[asset] = data
 
-# --- রিয়েল-টাইম ইন্ডিকেটর আপডেটের জন্য এন্ডপয়েন্ট ---
-@app.route('/get-market-update', methods=['POST'])
-def get_market_update_endpoint():
-    try:
-        options = request.get_json()
-        market_data, error_msg = get_market_data(options.get('asset'), options.get('timeframe'))
-        if error_msg: return jsonify({"error": error_msg}), 400
-        return jsonify(market_data)
-    except Exception as e: return jsonify({"error": f"মার্কেট আপডেট এ সমস্যা: {e}"}), 500
+def on_connect():
+    print("Connected to Quotex!")
+    # যতগুলো অ্যাসেট লাগবে, এখানে সাবস্ক্রাইব করুন
+    for asset in [
+        "EURUSD_OTC", "GBPUSD_OTC", "USDJPY_OTC"  # চাইলে আরও অ্যাসেট
+    ]:
+        q.select_asset(asset)
+        q.subscribe_candles(asset, 60)  # 1 মিনিট টাইমফ্রেম
 
-@app.route('/')
-def index():
-    return "AI Trading Bot (Final Corrected Version) Backend is Running!"
+q.on_candle = on_candle
+q.on_connect = on_connect
+
+# Quotex connect রাখতে background thread
+def run_quotex():
+    q.connect()
+    while True:
+        time.sleep(1)
+
+threading.Thread(target=run_quotex, daemon=True).start()
+
+@app.route('/api/otcdata')
+def get_otc_data():
+    asset = request.args.get('asset', '').replace('/', '').replace('-', '').upper() + "_OTC"
+    candle = latest_candles.get(asset)
+    if not candle:
+        return jsonify({"error": "No data yet"}), 404
+    # মার্কেট ডেটা return করুন
+    return jsonify({
+        "asset": asset,
+        "price": candle.get('close'),
+        "open": candle.get('open'),
+        "high": candle.get('max'),
+        "low": candle.get('min'),
+        "start": candle.get('from'),
+        "end": candle.get('to'),
+        # চাইলে RSI, MA নিজে ক্যালকুলেট করে এখানে দিন
+    })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0')
