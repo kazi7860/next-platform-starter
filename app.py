@@ -1,4 +1,4 @@
-# app.py (চূড়ান্ত সংস্করণ - সব ফিল্টার কার্যকরী এবং দুটি এন্ডপয়েন্টসহ)
+# app.py (চূড়ান্ত সমাধান - সঠিক লাইভ/ফিউচার সিগন্যাল লজিক)
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -12,104 +12,95 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 FMP_API_KEY = "kSy6pLcFKTueuh4QZqOSU3BbLWTwR48N"
 BASE_URL = "https://financialmodelingprep.com/api/v3"
 
-# --- ডেটা আনার এবং হেল্পার ফাংশন (উন্নত এরর হ্যান্ডলিং) ---
-def get_market_data(symbol, timeframe='1min', limit=300):
+# --- ডেটা আনার এবং হেল্পার ফাংশন ---
+def get_market_data(symbol, timeframe='1min', limit=100):
     fmp_symbol = symbol.replace('/', '').replace('-', '').replace('^', '')
     try:
         # সব API এন্ডপয়েন্ট
         candles_url = f"{BASE_URL}/historical-chart/{timeframe}/{fmp_symbol}?limit={limit}&apikey={FMP_API_KEY}"
-        
-        # API কল এবং স্ট্যাটাস কোড চেক
-        candles_response = requests.get(candles_url, timeout=20)
-        if candles_response.status_code != 200:
-            error_content = candles_response.json()
-            api_error_message = error_content.get("error", "API থেকে ডেটা আনতে সমস্যা হয়েছে।")
-            if "limit" in api_error_message.lower():
-                return None, "আপনার দৈনিক API ব্যবহারের সীমা শেষ হয়ে গেছে।"
-            return None, f"API Error: {api_error_message}"
-
-        candles_data = candles_response.json()
+        candles_data = requests.get(candles_url, timeout=15).json()
         if not isinstance(candles_data, list) or len(candles_data) < 50:
-            return None, f"'{symbol}' এর জন্য যথেষ্ট ক্যান্ডেল ডেটা পাওয়া যায়নি।"
+            return None, f"'{symbol}' এর জন্য যথেষ্ট মার্কেট ডেটা পাওয়া যায়নি।"
         all_candles = list(reversed(candles_data))
         
-        # অন্যান্য ইন্ডিকেটর
         rsi_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=14&type=rsi&apikey={FMP_API_KEY}", timeout=10).json()
-        sma_short_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=20&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
-        sma_long_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=50&type=sma&apikey={FMP_API_KEY}", timeout=10).json()
-        
+        sma_short_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=9&type=ema&apikey={FMP_API_KEY}", timeout=10).json()
+        sma_long_data = requests.get(f"{BASE_URL}/technical_indicator/daily/{fmp_symbol}?period=21&type=ema&apikey={FMP_API_KEY}", timeout=10).json()
         support, resistance = find_support_resistance(all_candles)
         
         return {
             "all_candles": all_candles, "latest_price": all_candles[-1]['close'], "support": support,
-            "resistance": resistance, "latest_rsi": rsi_data[0].get('rsi') if rsi_data else None,
-            "short_ma": sma_short_data[0].get('sma') if sma_short_data else None,
-            "latest_sma": sma_long_data[0].get('sma') if sma_long_data else None,
+            "resistance": resistance, "latest_rsi": rsi_data[0].get('rsi'),
+            "short_ma": sma_short_data[0].get('ema'), "latest_sma": sma_long_data[0].get('ema'),
         }, None
-    except requests.exceptions.RequestException as e:
-        return None, f"নেটওয়ার্ক সমস্যা: {e}"
     except Exception as e:
-        return None, f"ডেটা প্রসেসিং এ সমস্যা: {e}"
+        return None, f"API থেকে ডেটা আনতে সমস্যা: {e}"
 
 def find_support_resistance(candles): recent = candles[-50:]; return min(c['low'] for c in recent), max(c['high'] for c in recent)
-def is_strong_candle_signal(p, c):
-    try:
-        if c.get('open') < p.get('close') and c.get('close') > p.get('open'): return "BULLISH"
-        if c.get('open') > p.get('close') and c.get('close') < p.get('open'): return "BEARISH"
-    except (TypeError, KeyError): pass
-    return "NEUTRAL"
 
-def analyze_market_slice(candle_slice, trend_filter):
-    if len(candle_slice) < 2: return {"signal": "NEUTRAL"}
-    
-    p_candle, c_candle = candle_slice
-    if 'close' not in c_candle or 'open' not in p_candle: return {"signal": "NEUTRAL"}
+# --- চূড়ান্ত এবং শক্তিশালী প্রেডিকশন স্ট্র্যাটেজি ---
+def get_next_candle_prediction(market_data):
+    # ডেটা ভ্যালিডেশন
+    required_keys = ['latest_price', 'latest_rsi', 'short_ma', 'latest_sma']
+    if any(market_data.get(key) is None for key in required_keys):
+        return {"decision": "WAIT", "reason": "ইন্ডিকেটর ডেটা অসম্পূর্ণ।"}
 
-    trend_of_slice = "UP" if c_candle['close'] > p_candle['open'] else "DOWN"
-    
-    if trend_filter != 'ANY' and trend_of_slice != trend_filter:
-        return {"signal": "NEUTRAL"}
-    
-    # এখানে আপনার কনফ্লুয়েন্স স্ট্র্যাটেজি যোগ করা যেতে পারে
-    # আপাতত একটি সরলীকৃত স্ট্র্যাটেজি ব্যবহার করা হচ্ছে
-    candle_pattern = is_strong_candle_signal(p_candle, c_candle)
-    if candle_pattern == "BULLISH": return {"signal": "CALL"}
-    if candle_pattern == "BEARISH": return {"signal": "PUT"}
-    return {"signal": "NEUTRAL"}
+    # ডেটা প্রস্তুত করা
+    price = Decimal(str(market_data['latest_price']))
+    short_ma = Decimal(str(market_data['short_ma']))
+    long_ma = Decimal(str(market_data['latest_sma']))
+    rsi = market_data['latest_rsi']
 
-# --- এন্ডপয়েন্ট ১: ঐতিহাসিক সিগন্যাল খোঁজার জন্য ---
-@app.route('/get-historical-signals', methods=['POST'])
-def get_historical_signals_endpoint():
+    # ১. মূল ট্রেন্ড নির্ধারণ (EMA ক্রসওভার এবং প্রাইসের অবস্থান)
+    trend = "NEUTRAL"
+    if short_ma > long_ma and price > long_ma:
+        trend = "UP"
+    elif short_ma < long_ma and price < long_ma:
+        trend = "DOWN"
+
+    # ২. মোমেন্টাম এবং এক্সট্রিম কন্ডিশন (RSI)
+    is_oversold = rsi < 35
+    is_overbought = rsi > 65
+
+    # ৩. সিদ্ধান্ত নেওয়ার লজিক
+    
+    # শক্তিশালী CALL সিগন্যাল: আপট্রেন্ড + Oversold (দাম কমার পর ট্রেন্ডের দিকে আবার উঠবে)
+    if trend == "UP" and is_oversold:
+        return {"decision": "UP", "reason": " শক্তিশালী আপট্রেন্ডে প্রাইস এখন সাপোর্টের কাছে (Oversold)।"}
+
+    # শক্তিশালী PUT সিগন্যাল: ডাউনট্রেন্ড + Overbought (দাম বাড়ার পর ট্রেন্ডের দিকে আবার নামবে)
+    if trend == "DOWN" and is_overbought:
+        return {"decision": "DOWN", "reason": " শক্তিশালী ডাউনট্রেন্ডে প্রাইস এখন রেসিস্ট্যান্সের কাছে (Overbought)।"}
+
+    # সাধারণ ট্রেন্ড অনুসরণ
+    if trend == "UP":
+        return {"decision": "UP", "reason": "মার্কেট বর্তমানে আপট্রেন্ডে আছে।"}
+    
+    if trend == "DOWN":
+        return {"decision": "DOWN", "reason": "মার্কেট বর্তমানে ডাউনট্রেন্ডে আছে।"}
+
+    # যদি কোনো স্পষ্ট ট্রেন্ড না থাকে
+    return {"decision": "WAIT", "reason": "মার্কেট সাইডওয়েজ অথবা অনিশ্চিত। স্পষ্ট ট্রেন্ডের জন্য অপেক্ষা করুন।"}
+
+
+# --- মূল API এন্ডপয়েন্ট (এখন শুধুমাত্র একটি থাকবে) ---
+@app.route('/get-prediction', methods=['POST'])
+def get_prediction_endpoint():
     try:
         options = request.get_json()
         asset, timeframe = options.get('asset'), options.get('timeframe')
-        num_signals, signal_filter, trend_filter = options.get('num_signals'), options.get('signal_filter'), options.get('trend_filter')
-
         if not asset: return jsonify({"error": "Asset is required."}), 400
         
         market_data, error_msg = get_market_data(asset, timeframe)
         if error_msg: return jsonify({"error": error_msg, "market_data": None}), 400
 
-        found_signals, all_candles = [], market_data['all_candles']
-        for i in range(len(all_candles) - 2, 0, -1):
-            if len(found_signals) >= num_signals: break
-            
-            analysis = analyze_market_slice(all_candles[i:i+2], trend_filter)
-            signal_type = analysis['signal']
-            
-            if signal_type != "NEUTRAL" and (signal_filter == 'ALL' or signal_filter == signal_type):
-                # isWin বাস্তবে পরবর্তী ক্যান্ডেল দেখে নির্ধারিত হয়
-                is_win = all_candles[i+2]['close'] > all_candles[i+1]['close'] if signal_type == "CALL" else all_candles[i+2]['close'] < all_candles[i+1]['close']
-                found_signals.append({
-                    "asset": asset, "signalType": signal_type,
-                    "isWin": is_win, "timestamp": all_candles[i+1]['date']
-                })
+        prediction = get_next_candle_prediction(market_data)
         
-        return jsonify({"signals": found_signals, "market_data": market_data})
+        return jsonify({"prediction": prediction, "market_data": market_data})
     except Exception as e:
         return jsonify({"error": f"সার্ভারে একটি অপ্রত্যাশিত সমস্যা হয়েছে: {e}"}), 500
 
-# --- এন্ডপয়েন্ট ২: রিয়েল-টাইম ইন্ডিকেটর আপডেটের জন্য ---
+# রিয়েল-টাইম ইন্ডিকেটর আপডেটের জন্য
 @app.route('/get-market-update', methods=['POST'])
 def get_market_update_endpoint():
     try:
@@ -122,7 +113,7 @@ def get_market_update_endpoint():
 
 @app.route('/')
 def index():
-    return "AI Bot Final Corrected Version - Backend is Running!"
+    return "AI Trading Bot Final Prediction Backend (Logic Fixed) - Operational!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
