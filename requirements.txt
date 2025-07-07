@@ -1,4 +1,3 @@
 flask
 flask_cors
-quotexapi
-gunicorn
+git+https://github.com/IamMasood/quotex-API.git
