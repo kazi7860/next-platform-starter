@@ -1,3 +1,0 @@
-flask
-flask_cors
-git+https://github.com/IamMasood/quotex-API.git
