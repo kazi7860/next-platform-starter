@@ -1,4 +1,6 @@
 Flask
-Flask-CORS
+Flask-Cors
+Flask-Sock
+websocket-client
 requests
 gunicorn
